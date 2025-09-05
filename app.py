@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -11,6 +10,17 @@ from sklearn.preprocessing import PolynomialFeatures
 import ta
 import warnings
 warnings.filterwarnings('ignore')
+
+# Robust yfinance import with fallback
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+    st.success("✅ Live data mode: yfinance loaded successfully")
+except ImportError as e:
+    st.error(f"⚠️ yfinance import failed: {str(e)}")
+    st.warning("🔄 Running in DEMO MODE with sample data")
+    YFINANCE_AVAILABLE = False
+    yf = None
 
 # Page configuration
 st.set_page_config(
@@ -43,6 +53,34 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
+def get_demo_data(symbol="AAPL", period="1y"):
+    """Generate realistic demo stock data when yfinance is unavailable"""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    
+    # Generate realistic stock data
+    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    np.random.seed(hash(symbol) % 2**32)  # Consistent data per symbol
+    
+    # Simulate stock price movement
+    base_price = 150.0 if symbol == "AAPL" else 100.0
+    returns = np.random.normal(0.001, 0.02, len(dates))
+    prices = [base_price]
+    
+    for ret in returns[1:]:
+        prices.append(prices[-1] * (1 + ret))
+    
+    # Create realistic OHLCV data
+    data = pd.DataFrame({
+        'Open': [p * np.random.uniform(0.99, 1.01) for p in prices],
+        'High': [p * np.random.uniform(1.00, 1.03) for p in prices],
+        'Low': [p * np.random.uniform(0.97, 1.00) for p in prices],
+        'Close': prices,
+        'Volume': np.random.randint(1000000, 10000000, len(dates))
+    }, index=dates)
+    
+    return data
 
 # Title
 st.markdown('<h1 class="main-header">📈 Live Stock Analysis & Future Projection</h1>', unsafe_allow_html=True)
@@ -95,69 +133,76 @@ show_bollinger = st.sidebar.checkbox("Bollinger Bands", value=True)
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_stock_data(symbol, period):
-    """Fetch stock data from Yahoo Finance with improved error handling"""
-    try:
-        ticker = yf.Ticker(symbol)
-        
-        # Try different approaches to fetch data
-        data = None
-        info = None
-        
-        # Method 1: Standard history call
+    """Fetch stock data with fallback to demo data when yfinance is unavailable"""
+    if YFINANCE_AVAILABLE:
         try:
-            data = ticker.history(period=period, auto_adjust=True, prepost=True)
-        except:
-            pass
-        
-        # Method 2: If first method fails, try with different parameters
-        if data is None or data.empty:
+            ticker = yf.Ticker(symbol)
+            
+            # Try different approaches to fetch data
+            data = None
+            info = None
+            
+            # Method 1: Standard history call
             try:
-                data = ticker.history(period=period, interval='1d', auto_adjust=True)
+                data = ticker.history(period=period, auto_adjust=True, prepost=True)
             except:
                 pass
-        
-        # Method 3: Try with explicit start and end dates
-        if data is None or data.empty:
+            
+            # Method 2: If first method fails, try with different parameters
+            if data is None or data.empty:
+                try:
+                    data = ticker.history(period=period, interval='1d', auto_adjust=True)
+                except:
+                    pass
+            
+            # Method 3: Try with explicit start and end dates
+            if data is None or data.empty:
+                try:
+                    period_days = {'1mo': 30, '3mo': 90, '6mo': 180, '1y': 365, '2y': 730, '5y': 1825}
+                    days = period_days.get(period, 365)
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=days)
+                    data = ticker.history(start=start_date, end=end_date, auto_adjust=True)
+                except:
+                    pass
+            
+            # Try to get company info
             try:
-                from datetime import datetime, timedelta
-                period_days = {'1mo': 30, '3mo': 90, '6mo': 180, '1y': 365, '2y': 730, '5y': 1825}
-                days = period_days.get(period, 365)
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=days)
-                data = ticker.history(start=start_date, end=end_date, auto_adjust=True)
+                info = ticker.info
             except:
-                pass
-        
-        # Try to get company info
-        try:
-            info = ticker.info
-        except:
-            info = {'longName': symbol, 'sector': 'N/A', 'industry': 'N/A'}
-        
-        # Validate data
-        if data is not None and not data.empty and len(data) > 0:
-            # Ensure we have the required columns
-            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            if all(col in data.columns for col in required_columns):
-                return data, info
-        
-        # If all methods fail, return None
-        st.error(f"Unable to fetch data for {symbol}. This could be due to:")
-        st.error("• Invalid stock symbol")
-        st.error("• Market is closed and no recent data available")
-        st.error("• Temporary API issues with Yahoo Finance")
-        st.error("• Network connectivity issues")
-        return None, None
-        
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {str(e)}")
-        st.error("Please try refreshing the page or selecting a different stock symbol.")
-        return None, None
+                info = {'longName': symbol, 'sector': 'N/A', 'industry': 'N/A'}
+            
+            # Validate data
+            if data is not None and not data.empty and len(data) > 0:
+                # Ensure we have the required columns
+                required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+                if all(col in data.columns for col in required_columns):
+                    return data, info
+            
+            # If yfinance fails, fall back to demo data
+            st.warning(f"No live data available for {symbol}, using demo data")
+            demo_data = get_demo_data(symbol, period)
+            demo_info = {'longName': f'{symbol} (Demo)', 'sector': 'Demo', 'industry': 'Demo'}
+            return demo_data, demo_info
+            
+        except Exception as e:
+            st.error(f"Error fetching {symbol}: {str(e)}")
+            st.info("Falling back to demo data")
+            demo_data = get_demo_data(symbol, period)
+            demo_info = {'longName': f'{symbol} (Demo)', 'sector': 'Demo', 'industry': 'Demo'}
+            return demo_data, demo_info
+    else:
+        # yfinance not available, use demo data
+        demo_data = get_demo_data(symbol, period)
+        demo_info = {'longName': f'{symbol} (Demo)', 'sector': 'Demo', 'industry': 'Demo'}
+        return demo_data, demo_info
 
 def test_yfinance_connection():
     """Test yfinance connection with a simple query"""
+    if not YFINANCE_AVAILABLE:
+        return False, "yfinance not available - using demo data"
+    
     try:
-        import yfinance as yf
         # Test with a very reliable stock
         test_ticker = yf.Ticker("AAPL")
         test_data = test_ticker.history(period="5d")
@@ -453,7 +498,7 @@ if stock_data is not None and not stock_data.empty:
     fig.update_layout(height=800, showlegend=True, title_text=f"{selected_stock} Technical Analysis")
     fig.update_xaxes(rangeslider_visible=False)
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Future projection summary
     st.subheader("🔮 Future Projection Summary")
@@ -490,7 +535,7 @@ if stock_data is not None and not stock_data.empty:
     recent_data = stock_data.tail(10)[['Open', 'High', 'Low', 'Close', 'Volume']].round(2)
     recent_data['Change %'] = recent_data['Close'].pct_change() * 100
     recent_data = recent_data.round(2)
-    st.dataframe(recent_data, use_container_width=True)
+    st.dataframe(recent_data, width='stretch')
     
     # Analysis insights
     st.subheader("🧠 AI Insights")
